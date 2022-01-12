@@ -5,4 +5,22 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]] # Bin to run the HelloWorld gRPC server
+name = "crouton-server"
+path = "src/server.rs"
+
+[[bin]] # Bin to run the HelloWorld gRPC client
+name = "crouton-client"
+path = "src/client.rs"
+
 [dependencies]
+tonic = "0.6.1"
+prost = "0.9"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+crdts = "7.0"
+num-bigint = "0.4.3"
+num-traits = "0.2.14"
+clap = "2.33.4"
+
+[build-dependencies]
+tonic-build = "0.6"
