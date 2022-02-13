@@ -2,13 +2,12 @@ syntax = "proto3";
 
 import "google/protobuf/empty.proto";
 
-package crouton;
+package catalog;
 
 service Catalog {
     rpc Create (QueryRequest) returns (CreateReply);
     rpc Inc (QueryRequest) returns (AnswerReply);
     rpc Read (QueryRequest) returns (AnswerReply);
-    rpc Apply (ApplyRequest) returns (google.protobuf.Empty);
 }
 
 message QueryRequest {
@@ -24,6 +23,3 @@ message AnswerReply {
     int32 value = 1;
 }
 
-message ApplyRequest {
-    string reqJSon = 1;
-}

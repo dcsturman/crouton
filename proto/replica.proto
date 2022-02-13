@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+
+package replica;
+
+service Replica {
+    rpc apply (ApplyRequest) returns (google.protobuf.Empty);
+    rpc alive (AliveRequest) returns (google.protobuf.Empty);
+}
+
+message ApplyRequest {
+    string name = 1;
+    string op = 2;
+}
+
+message AliveRequest {
+    string address = 1;
+}
