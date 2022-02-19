@@ -5,10 +5,9 @@ use clap::{App, Arg};
 #[allow(unused_imports)]
 use log::{error, info, trace, warn};
 
-
 use std::net::SocketAddr;
 
-use crouton::{build_services};
+use crouton::build_services;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

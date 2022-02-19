@@ -96,12 +96,11 @@ mod tests {
             .spawn()
             .expect("Second daemon failed to start.");
 
-
         let dst = "http://[::1]:50055";
-        let mut first_client = wait_on_connect(dst.to_string()).await;        
+        let mut first_client = wait_on_connect(dst.to_string()).await;
 
         let dst = "http://[::1]:50065";
-        let mut second_client = wait_on_connect(dst.to_string()).await;        
+        let mut second_client = wait_on_connect(dst.to_string()).await;
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -121,7 +120,7 @@ mod tests {
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
             actor: "One".to_string(),
-        });        
+        });
         let _response = first_client.inc(request).await.unwrap();
         sleep(Duration::from_millis(2000)).await;
 

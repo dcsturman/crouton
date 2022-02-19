@@ -18,19 +18,19 @@ use log::{error, info, trace, warn};
 
 use crdts::{CmRDT, CvRDT, PNCounter};
 use num_traits::cast::ToPrimitive;
+use replica::apply_request::Datatype;
 use replica::replica_client::ReplicaClient;
 use replica::replica_server::{Replica, ReplicaServer};
 use replica::{AliveRequest, ApplyRequest};
-use replica::apply_request::Datatype;
 
+use core::fmt::Debug;
+use serde::ser::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio::{self, task, try_join};
-use serde::ser::Serialize;
-use core::fmt::Debug;
 
 type CatalogValueTable = HashMap<String, PNCounter<String>>;
 type PeerTable = HashMap<SocketAddr, Option<ReplicaClient<tonic::transport::Channel>>>;
@@ -127,7 +127,11 @@ impl CroutonCatalog {
     }
 
     async fn send_update<T: CvRDT + Debug + Serialize>(&self, name: &str, crdt: &T) {
-        trace!("CroutonCatalog::send_update: name: {:?} op: {:?}", name, crdt);
+        trace!(
+            "CroutonCatalog::send_update: name: {:?} op: {:?}",
+            name,
+            crdt
+        );
 
         let crdt_json = &serde_json::to_string(&crdt).unwrap();
 
