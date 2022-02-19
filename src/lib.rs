@@ -16,17 +16,21 @@ use tonic::{transport::Server, Code, Request, Response, Status};
 #[allow(unused_imports)]
 use log::{error, info, trace, warn};
 
-use crdts::{pncounter::Op, CmRDT, PNCounter};
+use crdts::{CmRDT, CvRDT, PNCounter};
 use num_traits::cast::ToPrimitive;
 use replica::replica_client::ReplicaClient;
 use replica::replica_server::{Replica, ReplicaServer};
 use replica::{AliveRequest, ApplyRequest};
+use replica::apply_request::Datatype;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio::{self, task, try_join};
+use serde::ser::Serialize;
+use core::fmt::Debug;
 
 type CatalogValueTable = HashMap<String, PNCounter<String>>;
 type PeerTable = HashMap<SocketAddr, Option<ReplicaClient<tonic::transport::Channel>>>;
@@ -62,6 +66,8 @@ impl CroutonCatalog {
             let peer = peers.read().await.clone();
 
             info!("CroutonCatalog::check_connections: Waking up and checking connections");
+
+            // Find the list of peers with home we do not have connections.
             let missing_peers = peer
                 .iter()
                 .filter_map(|(&addr, client)| {
@@ -73,6 +79,7 @@ impl CroutonCatalog {
                 })
                 .collect::<Vec<SocketAddr>>();
 
+            // If there are no peers without connections, we can just end this - no more work to do!
             if missing_peers.is_empty() {
                 info!("CroutonCatalog::check_connections: No update to peer clients so exiting early.");
                 return;
@@ -87,10 +94,14 @@ impl CroutonCatalog {
                     addr
                 );
                 new_clients.push((addr, new_client));
+
+                // TODO: If this is a new connection, we should send all our state to initialize it!
             }
 
             // Put this code in its own block to ensure we release the write lock before we wait
             // on the wakeup signal.
+            // Add the results from our attempts to connect into our table.
+            // Each such entry is a valid client Some(client) or invalid None.
             {
                 let mut table = self.peers.write().await;
                 for (&addr, client) in new_clients.iter() {
@@ -110,14 +121,15 @@ impl CroutonCatalog {
                 );
             }
 
+            // Wait for a wakeup signal to check all the connections again.
             rx.recv().await;
         }
     }
 
-    async fn send_update(&self, name: &str, op: &Op<String>) {
-        trace!("CroutonCatalog::send_update: name: {:?} op: {:?}", name, op);
+    async fn send_update<T: CvRDT + Debug + Serialize>(&self, name: &str, crdt: &T) {
+        trace!("CroutonCatalog::send_update: name: {:?} op: {:?}", name, crdt);
 
-        let op_json = &serde_json::to_string(&op).unwrap();
+        let crdt_json = &serde_json::to_string(&crdt).unwrap();
 
         let peers = self.peers.clone();
         trace!("CroutonCatalog::send_update: Attempt to get read lock on peers.");
@@ -142,7 +154,8 @@ impl CroutonCatalog {
             .map(|&client| async move {
                 let msg = tonic::Request::new(ApplyRequest {
                     name: name.to_string(),
-                    op: op_json.clone(),
+                    datatype: Datatype::Counter as i32,
+                    crdt: crdt_json.clone(),
                 });
 
                 let mut c = client.clone();
@@ -221,8 +234,10 @@ impl Catalog for Arc<CroutonCatalog> {
                 let op = val.inc(actor.clone());
                 info!("Catalog::inc: Increment {} with op `{:?}`.", name, op);
                 val.apply(op.clone());
+
+                // TODO: Change this to send actual value rather than an "op"
                 info!("Catalog::inc: Send update to peers: {} {:?}", name, op);
-                self.send_update(name, &op).await;
+                self.send_update(name, val).await;
                 info!("Catalog::inc: Updates sent to all peers: {} {:?}", name, op);
 
                 Ok(Response::new(catalog::AnswerReply {
@@ -239,22 +254,24 @@ impl Replica for Arc<CroutonCatalog> {
         trace!("apply: msg {:?}", apply);
 
         let name = &apply.get_ref().name;
-        let msg = &apply.get_ref().op;
-        let op: Op<String> = serde_json::from_str(msg).unwrap();
+        let msg = &apply.get_ref().crdt;
+        // TODO: Will need to encode the type in the message and deserialize accordingly
+        // once we support more than PNCounter.
+        let crdt: PNCounter<String> = serde_json::from_str(msg).unwrap();
         let mut values = self.values.write().await;
 
         // Likely should do something if I haven't seen this value before.
         if let Some(val) = values.get_mut(name) {
-            info!("Replica::apply: Val was {:?} with op {:?}", val, &op);
-            val.apply(op);
+            info!("Replica::apply: Val was {:?} with op {:?}", val, &crdt);
+            val.merge(crdt);
             info!("Replica::apply now {:?}", val);
         } else {
             info!(
                 "Replica::apply: New value seen {:?}, applying op {:?}",
-                name, &op
+                name, &crdt
             );
             let mut new_val = PNCounter::new();
-            new_val.apply(op);
+            new_val.merge(crdt);
             values.insert(name.clone(), new_val);
         }
 
@@ -440,10 +457,11 @@ mod test {
 
         for _ in 0..3 {
             let op = val.inc(actor.to_string());
-            val.apply(op.clone());
+            val.apply(op);
             let request = tonic::Request::new(ApplyRequest {
                 name: "VoteCounter".into(),
-                op: serde_json::to_string(&op).unwrap(),
+                datatype: Datatype::Counter as i32,
+                crdt: serde_json::to_string(&val).unwrap(),
             });
 
             target.apply(request).await.unwrap();

@@ -11,7 +11,11 @@ service Replica {
 
 message ApplyRequest {
     string name = 1;
-    string op = 2;
+    enum Datatype {
+        COUNTER = 0;
+    }
+    Datatype datatype = 2; 
+    string crdt = 3;
 }
 
 message AliveRequest {
