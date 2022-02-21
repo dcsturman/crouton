@@ -11,7 +11,7 @@ use catalog::{AnswerReply, CreateReply, QueryRequest};
 use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use futures_locks::RwLock;
-use tonic::{transport::Server, Code, Request, Response, Status};
+use tonic::{transport::Channel, transport::Server, Code, Request, Response, Status};
 
 #[allow(unused_imports)]
 use log::{error, info, trace, warn};
@@ -36,14 +36,20 @@ type CatalogValueTable = HashMap<String, PNCounter<String>>;
 type PeerTable = HashMap<SocketAddr, Option<ReplicaClient<tonic::transport::Channel>>>;
 #[derive(Debug)]
 pub struct CroutonCatalog {
+    address: SocketAddr,
     values: RwLock<CatalogValueTable>,
     peers: RwLock<PeerTable>,
     wakeup_tx: Option<Sender<()>>,
 }
 
 impl CroutonCatalog {
-    pub fn new(peers: Vec<SocketAddr>, wakeup: Option<Sender<()>>) -> CroutonCatalog {
+    pub fn new(
+        address: SocketAddr,
+        peers: Vec<SocketAddr>,
+        wakeup: Option<Sender<()>>,
+    ) -> CroutonCatalog {
         CroutonCatalog {
+            address,
             values: RwLock::new(HashMap::new()),
             peers: RwLock::new(peers.iter().map(|s| (*s, None)).collect()),
             wakeup_tx: wakeup,
@@ -55,20 +61,43 @@ impl CroutonCatalog {
         tx.clone()
     }
 
+    async fn send_all_state(
+        mut client: ReplicaClient<Channel>,
+        values: &CatalogValueTable,
+    ) -> Result<Response<()>, Status> {
+        for (name, value) in values.iter() {
+            let msg = ApplyRequest {
+                name: name.clone(),
+                datatype: Datatype::Counter as i32,
+                crdt: serde_json::to_string(value).unwrap(),
+            };
+
+            client.apply(msg).await?;
+        }
+        Ok(Response::new(()))
+    }
+
+    async fn remove_peer(&self, addr: &SocketAddr) {
+        let mut peers = self.peers.write().await;
+        info!("CroutonCatalog::remove_peer: Removing {:?}", addr);
+        peers.insert(*addr, None);
+    }
+
     pub async fn check_connections(&self, rx: &mut Receiver<()>) {
         loop {
-            let peers = self.peers.clone();
+            // Wait for a wakeup signal to check all the connections again.
+            rx.recv().await;
 
             // Why are we cloning here? Because otherwise we need to hold the
             // read lock, and cannot then grab the write lock later on.
             // So we use the read lock, grab a snapshot (we're fine if its a bit stale)
             // and use the clone of that.
-            let peer = peers.read().await.clone();
+            let peers = self.peers.read().await.clone();
 
             info!("CroutonCatalog::check_connections: Waking up and checking connections");
 
             // Find the list of peers with home we do not have connections.
-            let missing_peers = peer
+            let missing_peers = peers
                 .iter()
                 .filter_map(|(&addr, client)| {
                     if client.as_ref().is_none() {
@@ -82,20 +111,46 @@ impl CroutonCatalog {
             // If there are no peers without connections, we can just end this - no more work to do!
             if missing_peers.is_empty() {
                 info!("CroutonCatalog::check_connections: No update to peer clients so exiting early.");
-                return;
+                continue;
             }
 
+            let values = self.values.read().await.clone();
             let mut new_clients = Vec::new();
             for addr in missing_peers.iter() {
-                let res = ReplicaClient::connect(format!("http://{}", addr.to_string())).await;
-                let new_client = res.ok();
-                info!(
-                    "CroutonCatalog::check_connections: Successfully connected to {}",
-                    addr
-                );
-                new_clients.push((addr, new_client));
+                let new_client = ReplicaClient::connect(format!("http://{}", addr))
+                    .await
+                    .ok();
 
-                // TODO: If this is a new connection, we should send all our state to initialize it!
+                if let Some(active) = new_client.as_ref() {
+                    let msg = AliveRequest {
+                        address: self.address.to_string(),
+                    };
+                    let mut active = active.clone();
+                    info!(
+                        "CroutonCatalog::check_connections: Send alive message from {:?} to {:?}",
+                        self.address.to_string(),
+                        addr.to_string()
+                    );
+                    active.alive(msg).await.unwrap_or_else(|e| {
+                        error!(
+                            "CroutonCatalog::check_connections: Call to alive from {:?} to  {:?} failed: {:?}",
+                            self.address,
+                            addr,
+                            e
+                        );
+                        Response::new(())
+                    });
+                    match CroutonCatalog::send_all_state(active, &values).await {
+                        Ok(_) => (),
+                        Err(_) => self.remove_peer(addr).await,
+                    }
+                } else {
+                    info!(
+                        "CroutonCatalog::check_connections: Failed to connect to {}",
+                        addr
+                    );
+                }
+                new_clients.push((addr, new_client));
             }
 
             // Put this code in its own block to ensure we release the write lock before we wait
@@ -111,18 +166,7 @@ impl CroutonCatalog {
                         table.insert(addr, None);
                     }
                 }
-                info!(
-                    "CroutonCatalog::check_connections: Dump of peers: {:?}",
-                    table
-                        .values()
-                        .filter(|v| v.is_some())
-                        .collect::<Vec<_>>()
-                        .len()
-                );
             }
-
-            // Wait for a wakeup signal to check all the connections again.
-            rx.recv().await;
         }
     }
 
@@ -135,27 +179,29 @@ impl CroutonCatalog {
 
         let crdt_json = &serde_json::to_string(&crdt).unwrap();
 
-        let peers = self.peers.clone();
         trace!("CroutonCatalog::send_update: Attempt to get read lock on peers.");
-        let peer = peers.read().await;
+        let peers = self.peers.read().await;
         trace!("CroutonCatalog::send_update: Obtained read lock on peers.");
 
         info!(
             "CroutonCatalog::send_update: Dump of peers: {:?}",
-            peer.keys().map(|k| k.to_string())
+            peers.keys().map(|k| k.to_string())
         );
 
-        let live_peers = peer
-            .values()
-            .filter_map(|client| client.as_ref())
+        let live_peers = peers
+            .iter()
+            .filter(|(_, client)| client.is_some())
+            .map(|(&addr, client)| (addr, client.as_ref().unwrap().clone()))
             .collect::<Vec<_>>();
         info!(
             "CroutonCatalog::send_update: Send update to {} peers.",
             live_peers.len()
         );
 
+        drop(peers);
+
         let changes = stream::iter(live_peers.iter())
-            .map(|&client| async move {
+            .map(|(addr, client)| async move {
                 let msg = tonic::Request::new(ApplyRequest {
                     name: name.to_string(),
                     datatype: Datatype::Counter as i32,
@@ -164,10 +210,18 @@ impl CroutonCatalog {
 
                 let mut c = client.clone();
                 info!(
-                    "CroutonCatalog::send_update: send apply for Op `{:?}` to {:?}",
+                    "CroutonCatalog::send_update: send apply for `{:?}` to {:?}",
                     &msg, c
                 );
-                let ans = c.apply(msg).await;
+                let ans_result = c.apply(msg).await;
+                let ans = match ans_result {
+                    Ok(ans) => ans,
+                    Err(_) => {
+                        info!("CroutonCatalog::send_update: Lost connection to {}", addr);
+                        self.remove_peer(addr).await;
+                        Response::new(())
+                    }
+                };
                 trace!("CroutonCatalog::send_update: apply complete");
                 ans
             })
@@ -239,14 +293,23 @@ impl Catalog for Arc<CroutonCatalog> {
                 info!("Catalog::inc: Increment {} with op `{:?}`.", name, op);
                 val.apply(op.clone());
 
-                // TODO: Change this to send actual value rather than an "op"
-                info!("Catalog::inc: Send update to peers: {} {:?}", name, op);
-                self.send_update(name, val).await;
-                info!("Catalog::inc: Updates sent to all peers: {} {:?}", name, op);
-
-                Ok(Response::new(catalog::AnswerReply {
+                let response = Ok(Response::new(catalog::AnswerReply {
                     value: val.read().to_i32().unwrap(),
-                }))
+                }));
+
+                // Cloning val so that we can release the write lock later.  The clone
+                // will only be used to send an update to peers.
+                let val = val.clone();
+
+                // Release the write lock before sending updates so we don't hold it that long.
+                drop(values);
+
+                self.send_update(name, &val).await;
+                info!(
+                    "Catalog::inc: Updates sent to all peers: {} {:?}",
+                    name, val
+                );
+                response
             }
         }
     }
@@ -258,33 +321,48 @@ impl Replica for Arc<CroutonCatalog> {
         trace!("apply: msg {:?}", apply);
 
         let name = &apply.get_ref().name;
+        let datatype = &apply.get_ref().datatype;
         let msg = &apply.get_ref().crdt;
-        // TODO: Will need to encode the type in the message and deserialize accordingly
-        // once we support more than PNCounter.
-        let crdt: PNCounter<String> = serde_json::from_str(msg).unwrap();
+
+        // TODO: Should use Datatype.Counter instead of 0 but its not working
+        let crdt = match datatype {
+            0 => serde_json::from_str(msg).unwrap(),
+            _ => unimplemented!("Unknown datatype in apply message."),
+        };
+
         let mut values = self.values.write().await;
 
-        // Likely should do something if I haven't seen this value before.
         if let Some(val) = values.get_mut(name) {
+            // Merge the receveived value with the value we have for this crdt
             info!("Replica::apply: Val was {:?} with op {:?}", val, &crdt);
             val.merge(crdt);
             info!("Replica::apply now {:?}", val);
         } else {
+            // We haven't seen this crdt before so create it with this value.
             info!(
                 "Replica::apply: New value seen {:?}, applying op {:?}",
                 name, &crdt
             );
-            let mut new_val = PNCounter::new();
-            new_val.merge(crdt);
-            values.insert(name.clone(), new_val);
+            values.insert(name.clone(), crdt);
         }
 
         Ok(Response::new(()))
     }
 
-    async fn alive(&self, _req: Request<AliveRequest>) -> Result<Response<()>, Status> {
+    async fn alive(&self, req: Request<AliveRequest>) -> Result<Response<()>, Status> {
+        info!(
+            "Replica::alive: {:?} got alive call from {:?}",
+            self.address,
+            req.get_ref().address
+        );
         let tx = self.get_wakeup_sender();
-        tx.send(()).await.unwrap();
+        tx.send(()).await.unwrap_or_else(|e| {
+            panic!(
+                "Replica::alive: Failed signal wakeup at {:?}: \t{:?}",
+                self.address, e
+            )
+        });
+        info!("Replica::alive: {:?} woke itself up.", self.address);
         Ok(Response::new(()))
     }
 }
@@ -297,25 +375,31 @@ pub async fn build_services(
     info!("build_services: Starting server...");
 
     let (tx, mut rx): (Sender<()>, Receiver<()>) = mpsc::channel(100);
-    let catalog = Arc::new(CroutonCatalog::new(cluster, Some(tx)));
+    let catalog = Arc::new(CroutonCatalog::new(c_addr, cluster, Some(tx)));
     let forever = catalog.clone();
     task::spawn(async move {
         let x = forever.clone();
         x.check_connections(&mut rx).await;
     });
 
+    task::yield_now().await;
+
     let tx = catalog.get_wakeup_sender();
     task::spawn(async move {
-        sleep(Duration::from_millis(10000)).await;
-        tx.send(()).await.unwrap();
+        loop {
+            tx.send(()).await.unwrap();
+            sleep(Duration::from_millis(10000)).await;
+        }
     });
+
+    task::yield_now().await;
 
     let catalog_server = Server::builder()
         .add_service(CatalogServer::new(catalog.clone()))
         .serve(c_addr);
     info!(
         "build_services: Starting up Catalog Service on port {}.",
-        c_addr.to_string()
+        c_addr
     );
 
     let replica_server = Server::builder()
@@ -323,7 +407,7 @@ pub async fn build_services(
         .serve(r_addr);
     info!(
         "build_services: Starting up Replica Service on port {}.",
-        r_addr.to_string()
+        r_addr
     );
     try_join!(catalog_server, replica_server)?;
 
@@ -341,11 +425,17 @@ mod test {
         INIT.call_once(pretty_env_logger::init);
     }
 
+    const DUMMY_ADDR: &str = "127.0.0.1:8080";
+
     #[tokio::test]
     async fn simple_create() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(Vec::new(), None));
+        let catalog = Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        ));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -360,7 +450,11 @@ mod test {
     async fn simple_create_and_inc() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(Vec::new(), None));
+        let catalog = Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        ));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -383,7 +477,11 @@ mod test {
     async fn inc_three() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(Vec::new(), None));
+        let catalog = Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        ));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -409,7 +507,11 @@ mod test {
     async fn inc_ten_and_read() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(Vec::new(), None));
+        let catalog = Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        ));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -441,8 +543,16 @@ mod test {
     async fn do_apply() {
         init_logger();
 
-        let original = Arc::new(CroutonCatalog::new(Vec::new(), None));
-        let target = Arc::new(CroutonCatalog::new(Vec::new(), None));
+        let original = Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        ));
+        let target = Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        ));
 
         let name = "VoteCounter";
         let actor = "Me";
