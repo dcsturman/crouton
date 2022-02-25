@@ -1,4 +1,3 @@
-
 use crouton_protos::catalog::catalog_server::{Catalog, CatalogServer};
 use crouton_protos::catalog::{AnswerReply, CreateReply, QueryRequest};
 use futures::future::join_all;
@@ -10,16 +9,18 @@ use tonic::{transport::Channel, transport::Server, Code, Request, Response, Stat
 use log::{error, info, trace, warn};
 
 use crdts::{CmRDT, CvRDT, PNCounter};
-use num_traits::cast::ToPrimitive;
-use crouton_protos::replica::{ AliveRequest, ApplyRequest, apply_request::Datatype, replica_client::ReplicaClient };
 use crouton_protos::replica::replica_server::{Replica, ReplicaServer};
+use crouton_protos::replica::{
+    apply_request::Datatype, replica_client::ReplicaClient, AliveRequest, ApplyRequest,
+};
+use num_traits::cast::ToPrimitive;
 
 use core::fmt::Debug;
 use serde::ser::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio::{self, task, try_join};

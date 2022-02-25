@@ -1,5 +1,5 @@
 pub mod catalog {
-    tonic::include_proto!("catalog"); 
+    tonic::include_proto!("catalog");
 }
 
 pub mod replica {
