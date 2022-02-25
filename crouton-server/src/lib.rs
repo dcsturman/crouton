@@ -373,10 +373,10 @@ impl Replica for ArcCroutonCatalog {
         tx.send(()).await.unwrap_or_else(|e| {
             panic!(
                 "Replica::alive: Failed signal wakeup at {:?}: \t{:?}",
-                self.0.address, e
+                self.address, e
             )
         });
-        info!("Replica::alive: {:?} woke itself up.", self.0.address);
+        info!("Replica::alive: {:?} woke itself up.", self.address);
         Ok(Response::new(()))
     }
 }
@@ -393,12 +393,12 @@ pub async fn build_services(
     let forever = catalog.clone();
     task::spawn(async move {
         let x = forever.clone();
-        x.0.check_connections(&mut rx).await;
+        x.check_connections(&mut rx).await;
     });
 
     task::yield_now().await;
 
-    let tx = catalog.0.get_wakeup_sender();
+    let tx = catalog.get_wakeup_sender();
     task::spawn(async move {
         loop {
             tx.send(()).await.unwrap();
@@ -581,7 +581,7 @@ mod test {
 
         // This is a bit ugly but I'm hacking into the internals of MyCatalog, and
         // replicating the logic of inc. Its the only way to get the Op built.
-        let mut values = original.0.values.write().await;
+        let mut values = original.values.write().await;
         let val = values.get_mut(name).unwrap();
 
         for _ in 0..3 {
