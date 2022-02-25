@@ -19,6 +19,7 @@ use serde::ser::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio::{self, task, try_join};
@@ -225,6 +226,20 @@ impl CroutonCatalog {
 
 struct ArcCroutonCatalog(Arc<CroutonCatalog>);
 
+impl Deref for ArcCroutonCatalog {
+    type Target = Arc<CroutonCatalog>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for ArcCroutonCatalog {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl Clone for ArcCroutonCatalog {
     fn clone(&self) -> Self {
         ArcCroutonCatalog(self.0.clone())
@@ -243,14 +258,14 @@ impl Catalog for ArcCroutonCatalog {
         );
 
         let name = request.get_ref().name.clone();
-        let table = self.0.values.read().await;
+        let table = self.values.read().await;
         if table.contains_key(&name) {
             return Ok(Response::new(CreateReply { status: 1 }));
         }
         // Release the read lock as now we need to get the write lock to create the entry.
         drop(table);
 
-        let mut values = self.0.values.write().await;
+        let mut values = self.values.write().await;
         values.insert(name, PNCounter::new());
         let reply = CreateReply { status: 0 };
         Ok(Response::new(reply))
@@ -260,7 +275,7 @@ impl Catalog for ArcCroutonCatalog {
         info!("Catalog::read: Got a read request {:?}", request);
 
         let name = &request.get_ref().name;
-        let values = self.0.values.read().await;
+        let values = self.values.read().await;
         match values.get(name) {
             None => Err(Status::new(
                 Code::Unknown,
@@ -281,7 +296,7 @@ impl Catalog for ArcCroutonCatalog {
 
         let name = &request.get_ref().name;
         let actor = &request.get_ref().actor;
-        let mut values = self.0.values.write().await;
+        let mut values = self.values.write().await;
         match values.get_mut(name) {
             None => Err(tonic::Status::new(
                 tonic::Code::InvalidArgument,
@@ -303,7 +318,7 @@ impl Catalog for ArcCroutonCatalog {
                 // Release the write lock before sending updates so we don't hold it that long.
                 drop(values);
 
-                self.0.send_update(name, &val).await;
+                self.send_update(name, &val).await;
                 info!(
                     "Catalog::inc: Updates sent to all peers: {} {:?}",
                     name, val
@@ -329,7 +344,7 @@ impl Replica for ArcCroutonCatalog {
             _ => unimplemented!("Unknown datatype in apply message."),
         };
 
-        let mut values = self.0.values.write().await;
+        let mut values = self.values.write().await;
 
         if let Some(val) = values.get_mut(name) {
             // Merge the receveived value with the value we have for this crdt
@@ -351,10 +366,10 @@ impl Replica for ArcCroutonCatalog {
     async fn alive(&self, req: Request<AliveRequest>) -> Result<Response<()>, Status> {
         info!(
             "Replica::alive: {:?} got alive call from {:?}",
-            self.0.address,
+            self.address,
             req.get_ref().address
         );
-        let tx = self.0.get_wakeup_sender();
+        let tx = self.get_wakeup_sender();
         tx.send(()).await.unwrap_or_else(|e| {
             panic!(
                 "Replica::alive: Failed signal wakeup at {:?}: \t{:?}",
