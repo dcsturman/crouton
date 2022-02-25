@@ -1,4 +1,4 @@
-extern crate crouton;
+extern crate crouton_server;
 
 use clap::{App, Arg};
 
@@ -7,7 +7,7 @@ use log::{error, info, trace, warn};
 
 use std::net::SocketAddr;
 
-use crouton::build_services;
+use crouton_server::build_services;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

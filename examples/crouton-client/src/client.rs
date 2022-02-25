@@ -1,8 +1,6 @@
-extern crate crouton;
-
 use clap::{App, Arg};
-use crouton::catalog::catalog_client::CatalogClient;
-use crouton::catalog::QueryRequest;
+use crouton_protos::catalog::catalog_client::CatalogClient;
+use crouton_protos::catalog::QueryRequest;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

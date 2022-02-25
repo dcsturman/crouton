@@ -1,13 +1,6 @@
-pub mod catalog {
-    tonic::include_proto!("catalog"); // The string specified here must match the proto package name
-}
 
-pub mod replica {
-    tonic::include_proto!("replica");
-}
-
-use catalog::catalog_server::{Catalog, CatalogServer};
-use catalog::{AnswerReply, CreateReply, QueryRequest};
+use crouton_protos::catalog::catalog_server::{Catalog, CatalogServer};
+use crouton_protos::catalog::{AnswerReply, CreateReply, QueryRequest};
 use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use futures_locks::RwLock;
@@ -18,10 +11,8 @@ use log::{error, info, trace, warn};
 
 use crdts::{CmRDT, CvRDT, PNCounter};
 use num_traits::cast::ToPrimitive;
-use replica::apply_request::Datatype;
-use replica::replica_client::ReplicaClient;
-use replica::replica_server::{Replica, ReplicaServer};
-use replica::{AliveRequest, ApplyRequest};
+use crouton_protos::replica::{ AliveRequest, ApplyRequest, apply_request::Datatype, replica_client::ReplicaClient };
+use crouton_protos::replica::replica_server::{Replica, ReplicaServer};
 
 use core::fmt::Debug;
 use serde::ser::Serialize;
@@ -232,8 +223,16 @@ impl CroutonCatalog {
     }
 }
 
+struct ArcCroutonCatalog(Arc<CroutonCatalog>);
+
+impl Clone for ArcCroutonCatalog {
+    fn clone(&self) -> Self {
+        ArcCroutonCatalog(self.0.clone())
+    }
+}
+
 #[tonic::async_trait]
-impl Catalog for Arc<CroutonCatalog> {
+impl Catalog for ArcCroutonCatalog {
     async fn create(
         &self,
         request: Request<QueryRequest>,
@@ -244,16 +243,16 @@ impl Catalog for Arc<CroutonCatalog> {
         );
 
         let name = request.get_ref().name.clone();
-        let table = self.values.read().await;
+        let table = self.0.values.read().await;
         if table.contains_key(&name) {
-            return Ok(Response::new(catalog::CreateReply { status: 1 }));
+            return Ok(Response::new(CreateReply { status: 1 }));
         }
         // Release the read lock as now we need to get the write lock to create the entry.
         drop(table);
 
-        let mut values = self.values.write().await;
+        let mut values = self.0.values.write().await;
         values.insert(name, PNCounter::new());
-        let reply = catalog::CreateReply { status: 0 };
+        let reply = CreateReply { status: 0 };
         Ok(Response::new(reply))
     }
 
@@ -261,14 +260,14 @@ impl Catalog for Arc<CroutonCatalog> {
         info!("Catalog::read: Got a read request {:?}", request);
 
         let name = &request.get_ref().name;
-        let values = self.values.read().await;
+        let values = self.0.values.read().await;
         match values.get(name) {
             None => Err(Status::new(
                 Code::Unknown,
                 format!("No such value to read named {}", name),
             )),
             Some(val) => {
-                let reply = catalog::AnswerReply {
+                let reply = AnswerReply {
                     value: val.read().to_i32().unwrap(),
                 };
 
@@ -282,7 +281,7 @@ impl Catalog for Arc<CroutonCatalog> {
 
         let name = &request.get_ref().name;
         let actor = &request.get_ref().actor;
-        let mut values = self.values.write().await;
+        let mut values = self.0.values.write().await;
         match values.get_mut(name) {
             None => Err(tonic::Status::new(
                 tonic::Code::InvalidArgument,
@@ -293,7 +292,7 @@ impl Catalog for Arc<CroutonCatalog> {
                 info!("Catalog::inc: Increment {} with op `{:?}`.", name, op);
                 val.apply(op.clone());
 
-                let response = Ok(Response::new(catalog::AnswerReply {
+                let response = Ok(Response::new(AnswerReply {
                     value: val.read().to_i32().unwrap(),
                 }));
 
@@ -304,7 +303,7 @@ impl Catalog for Arc<CroutonCatalog> {
                 // Release the write lock before sending updates so we don't hold it that long.
                 drop(values);
 
-                self.send_update(name, &val).await;
+                self.0.send_update(name, &val).await;
                 info!(
                     "Catalog::inc: Updates sent to all peers: {} {:?}",
                     name, val
@@ -316,7 +315,7 @@ impl Catalog for Arc<CroutonCatalog> {
 }
 
 #[tonic::async_trait]
-impl Replica for Arc<CroutonCatalog> {
+impl Replica for ArcCroutonCatalog {
     async fn apply(&self, apply: Request<ApplyRequest>) -> Result<Response<()>, Status> {
         trace!("apply: msg {:?}", apply);
 
@@ -330,7 +329,7 @@ impl Replica for Arc<CroutonCatalog> {
             _ => unimplemented!("Unknown datatype in apply message."),
         };
 
-        let mut values = self.values.write().await;
+        let mut values = self.0.values.write().await;
 
         if let Some(val) = values.get_mut(name) {
             // Merge the receveived value with the value we have for this crdt
@@ -352,17 +351,17 @@ impl Replica for Arc<CroutonCatalog> {
     async fn alive(&self, req: Request<AliveRequest>) -> Result<Response<()>, Status> {
         info!(
             "Replica::alive: {:?} got alive call from {:?}",
-            self.address,
+            self.0.address,
             req.get_ref().address
         );
-        let tx = self.get_wakeup_sender();
+        let tx = self.0.get_wakeup_sender();
         tx.send(()).await.unwrap_or_else(|e| {
             panic!(
                 "Replica::alive: Failed signal wakeup at {:?}: \t{:?}",
-                self.address, e
+                self.0.address, e
             )
         });
-        info!("Replica::alive: {:?} woke itself up.", self.address);
+        info!("Replica::alive: {:?} woke itself up.", self.0.address);
         Ok(Response::new(()))
     }
 }
@@ -375,16 +374,16 @@ pub async fn build_services(
     info!("build_services: Starting server...");
 
     let (tx, mut rx): (Sender<()>, Receiver<()>) = mpsc::channel(100);
-    let catalog = Arc::new(CroutonCatalog::new(c_addr, cluster, Some(tx)));
+    let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(c_addr, cluster, Some(tx))));
     let forever = catalog.clone();
     task::spawn(async move {
         let x = forever.clone();
-        x.check_connections(&mut rx).await;
+        x.0.check_connections(&mut rx).await;
     });
 
     task::yield_now().await;
 
-    let tx = catalog.get_wakeup_sender();
+    let tx = catalog.0.get_wakeup_sender();
     task::spawn(async move {
         loop {
             tx.send(()).await.unwrap();
@@ -431,11 +430,11 @@ mod test {
     async fn simple_create() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(
+        let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Vec::new(),
             None,
-        ));
+        )));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -450,11 +449,11 @@ mod test {
     async fn simple_create_and_inc() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(
+        let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Vec::new(),
             None,
-        ));
+        )));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -477,11 +476,11 @@ mod test {
     async fn inc_three() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(
+        let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Vec::new(),
             None,
-        ));
+        )));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -507,11 +506,11 @@ mod test {
     async fn inc_ten_and_read() {
         init_logger();
 
-        let catalog = Arc::new(CroutonCatalog::new(
+        let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Vec::new(),
             None,
-        ));
+        )));
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -543,16 +542,17 @@ mod test {
     async fn do_apply() {
         init_logger();
 
-        let original = Arc::new(CroutonCatalog::new(
+        let original = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Vec::new(),
             None,
-        ));
-        let target = Arc::new(CroutonCatalog::new(
+        )));
+
+        let target = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Vec::new(),
             None,
-        ));
+        )));
 
         let name = "VoteCounter";
         let actor = "Me";
@@ -566,7 +566,7 @@ mod test {
 
         // This is a bit ugly but I'm hacking into the internals of MyCatalog, and
         // replicating the logic of inc. Its the only way to get the Op built.
-        let mut values = original.values.write().await;
+        let mut values = original.0.values.write().await;
         let val = values.get_mut(name).unwrap();
 
         for _ in 0..3 {

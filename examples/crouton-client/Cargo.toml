@@ -1,0 +1,18 @@
+[package]
+name = "crouton-client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+crouton-protos = { path = "../../crouton-protos" }
+tokio = { version = "1.0", features = ["macros", "process", "sync", "rt-multi-thread"] }
+clap = "2.33.4"
+tonic = "0.6.1"
+
+
+[[bin]]
+name = "crouton-client"
+path = "src/client.rs"
+
