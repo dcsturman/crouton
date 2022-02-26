@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-crouton-protos = { path = "../crouton-protos" }
+crouton = { path = "../crouton" }
 log = "0.4"
 pretty_env_logger = "0.4"
 tokio = { version = "1.0", features = ["macros", "process", "sync", "rt-multi-thread"] }

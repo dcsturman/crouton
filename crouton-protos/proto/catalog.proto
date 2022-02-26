@@ -5,7 +5,7 @@ import "google/protobuf/empty.proto";
 package catalog;
 
 service Catalog {
-    rpc Create (QueryRequest) returns (CreateReply);
+    rpc Create (QueryRequest) returns (google.protobuf.Empty);
     rpc Inc (QueryRequest) returns (AnswerReply);
     rpc Read (QueryRequest) returns (AnswerReply);
 }
@@ -13,10 +13,6 @@ service Catalog {
 message QueryRequest {
    string name = 1;
    string actor = 2;
-}
-
-message CreateReply {
-    int32 status = 1;
 }
 
 message AnswerReply {

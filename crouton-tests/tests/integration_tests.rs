@@ -3,28 +3,20 @@ mod tests {
     #[allow(unused_imports)]
     use log::{error, info, trace, warn};
 
-    use crouton_protos::catalog::catalog_client::CatalogClient;
-    use crouton_protos::catalog::QueryRequest;
+    use crouton::CroutonClient;
     use std::sync::Once;
     use tokio::process::Command;
     use tokio::time::{sleep, Duration};
-    use tonic::transport::Channel;
 
     static SERVER_PATH: &str = "../target/debug/crouton-server";
+    static DEFAULT_COUNTER_NAME: &str = "VoteCounter";
+    static DEFAULT_ACTOR_NAME: &str = "Me";
+    static SECOND_ACTOR_NAME: &str = "Gul";
+
     static INIT: Once = Once::new();
 
     fn init_logger() {
         INIT.call_once(pretty_env_logger::init);
-    }
-
-    async fn wait_on_connect(dst: String) -> CatalogClient<Channel> {
-        loop {
-            let connection = CatalogClient::connect(dst.clone()).await.ok();
-            if let Some(valid_connection) = connection {
-                return valid_connection;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
     }
 
     #[tokio::test]
@@ -39,15 +31,8 @@ mod tests {
         sleep(Duration::from_millis(1000)).await;
 
         let dst = "http://[::1]:50051";
-        let mut client = wait_on_connect(dst.to_string()).await;
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "Me".to_string(),
-        });
-
-        let response = client.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
+        let mut client = CroutonClient::new_and_wait(dst, DEFAULT_ACTOR_NAME).await;
+        client.create(DEFAULT_COUNTER_NAME).await.unwrap();
     }
 
     #[tokio::test]
@@ -62,23 +47,11 @@ mod tests {
 
         let dst = "http://[::1]:50053";
 
-        let mut client = wait_on_connect(dst.to_string()).await;
+        let mut client = CroutonClient::new_and_wait(dst, DEFAULT_ACTOR_NAME).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "Me".to_string(),
-        });
-
-        let response = client.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "Me".to_string(),
-        });
-
-        let response = client.inc(request).await.unwrap();
-        assert_eq!(response.get_ref().value, 1);
+        client.create(DEFAULT_COUNTER_NAME).await.unwrap();
+        let response = client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        assert_eq!(response, 1);
     }
 
     #[tokio::test]
@@ -98,40 +71,25 @@ mod tests {
             .expect("Second daemon failed to start.");
 
         let dst = "http://[::1]:50055";
-        let mut first_client = wait_on_connect(dst.to_string()).await;
+        let mut first_client = CroutonClient::new_and_wait(dst, DEFAULT_ACTOR_NAME).await;
 
         let dst = "http://[::1]:50065";
-        let mut second_client = wait_on_connect(dst.to_string()).await;
+        let mut second_client = CroutonClient::new_and_wait(dst, SECOND_ACTOR_NAME).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let response = first_client.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
+        first_client.create(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
         info!("Sleep for 2 sec....");
         sleep(Duration::from_millis(2000)).await;
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
+
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
         sleep(Duration::from_millis(2000)).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "Two".to_string(),
-        });
-
-        let response = second_client.read(request).await.expect("Read error.");
-        assert_eq!(response.get_ref().value, 2);
+        let response = second_client
+            .read(DEFAULT_COUNTER_NAME)
+            .await
+            .expect("Read error.");
+        assert_eq!(response, 2);
     }
 
     #[tokio::test]
@@ -145,28 +103,11 @@ mod tests {
             .expect("First daemon failed to start.");
 
         let dst = "http://[::1]:50057";
-        let mut first_client = wait_on_connect(dst.to_string()).await;
+        let mut first_client = CroutonClient::new_and_wait(dst, DEFAULT_ACTOR_NAME).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let response = first_client.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
-
-        info!("Sleep for 2 sec....");
-        sleep(Duration::from_millis(2000)).await;
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
+        let _response = first_client.create(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
         let mut _second = Command::new(SERVER_PATH)
             .args(["-p", "50067", "-s", "[::1]:50058"])
@@ -175,17 +116,15 @@ mod tests {
             .expect("Second daemon failed to start.");
 
         let dst = "http://[::1]:50065";
-        let mut second_client = wait_on_connect(dst.to_string()).await;
 
-        sleep(Duration::from_millis(2000)).await;
+        let mut second_client = CroutonClient::new_and_wait(dst, SECOND_ACTOR_NAME).await;
+        sleep(Duration::from_millis(4000)).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "Two".to_string(),
-        });
-
-        let response = second_client.read(request).await.expect("Read error.");
-        assert_eq!(response.get_ref().value, 2);
+        let response = second_client
+            .read(DEFAULT_COUNTER_NAME)
+            .await
+            .expect("Read error.");
+        assert_eq!(response, 2);
     }
 
     #[tokio::test]
@@ -205,28 +144,10 @@ mod tests {
             .expect("Second daemon failed to start.");
 
         let dst = "http://[::1]:50100";
-        let mut first_client = wait_on_connect(dst.to_string()).await;
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let response = first_client.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
-
-        info!("Sleep for 2 sec....");
-        sleep(Duration::from_millis(2000)).await;
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
+        let mut first_client = CroutonClient::new_and_wait(dst, DEFAULT_ACTOR_NAME).await;
+        first_client.create(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
         let mut _third = Command::new(SERVER_PATH)
             .args(["-p", "50120", "-s", "[::1]:50101", "[::1]:50111"])
@@ -235,17 +156,15 @@ mod tests {
             .expect("Third (late) daemon failed to start.");
 
         let dst = "http://[::1]:50120";
-        let mut second_client = wait_on_connect(dst.to_string()).await;
+        let mut second_client = CroutonClient::new_and_wait(dst, SECOND_ACTOR_NAME).await;
 
         sleep(Duration::from_millis(2000)).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "Two".to_string(),
-        });
-
-        let response = second_client.read(request).await.expect("Read error.");
-        assert_eq!(response.get_ref().value, 2);
+        let response = second_client
+            .read(DEFAULT_COUNTER_NAME)
+            .await
+            .expect("Read error.");
+        assert_eq!(response, 2);
     }
 
     #[tokio::test]
@@ -265,46 +184,21 @@ mod tests {
             .expect("Second daemon failed to start.");
 
         let dst = "http://[::1]:50200";
-        let mut first_client = wait_on_connect(dst.to_string()).await;
+        let mut first_client = CroutonClient::new_and_wait(dst, DEFAULT_ACTOR_NAME).await;
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-
-        let response = first_client.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
+        first_client.create(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
         info!("Sleep for 2 sec....");
         sleep(Duration::from_millis(2000)).await;
 
         second.kill().await.unwrap();
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = first_client.inc(request).await.unwrap();
+        let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        let response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let response = first_client.inc(request).await.unwrap();
-
-        assert_eq!(response.get_ref().value, 4);
+        assert_eq!(response, 4);
 
         info!("Sleep for 2 sec....");
         sleep(Duration::from_millis(2000)).await;
@@ -316,18 +210,9 @@ mod tests {
             .expect("Second daemon failed to start.");
 
         let dst = "http://[::1]:50210";
-        let mut second_client = wait_on_connect(dst.to_string()).await;
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let _response = second_client.inc(request).await.unwrap();
-
-        let request = tonic::Request::new(QueryRequest {
-            name: "VoteCounter".into(),
-            actor: "One".to_string(),
-        });
-        let response = second_client.inc(request).await.unwrap();
-        assert_eq!(response.get_ref().value, 6);
+        let mut second_client = CroutonClient::new_and_wait(dst, SECOND_ACTOR_NAME).await;
+        let _response = second_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        let response = second_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
+        assert_eq!(response, 6);
     }
 }

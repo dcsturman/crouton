@@ -1,5 +1,5 @@
 use crouton_protos::catalog::catalog_server::{Catalog, CatalogServer};
-use crouton_protos::catalog::{AnswerReply, CreateReply, QueryRequest};
+use crouton_protos::catalog::{AnswerReply, QueryRequest};
 use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use futures_locks::RwLock;
@@ -249,10 +249,7 @@ impl Clone for ArcCroutonCatalog {
 
 #[tonic::async_trait]
 impl Catalog for ArcCroutonCatalog {
-    async fn create(
-        &self,
-        request: Request<QueryRequest>,
-    ) -> Result<Response<CreateReply>, Status> {
+    async fn create(&self, request: Request<QueryRequest>) -> Result<Response<()>, Status> {
         info!(
             "Catalog::create: Got a request to create counter: {:?}",
             request
@@ -261,15 +258,18 @@ impl Catalog for ArcCroutonCatalog {
         let name = request.get_ref().name.clone();
         let table = self.values.read().await;
         if table.contains_key(&name) {
-            return Ok(Response::new(CreateReply { status: 1 }));
+            return Err(Status::new(
+                Code::AlreadyExists,
+                format!("Key {} already exists.", &name),
+            ));
         }
+
         // Release the read lock as now we need to get the write lock to create the entry.
         drop(table);
 
         let mut values = self.values.write().await;
         values.insert(name, PNCounter::new());
-        let reply = CreateReply { status: 0 };
-        Ok(Response::new(reply))
+        Ok(Response::new(()))
     }
 
     async fn read(&self, request: Request<QueryRequest>) -> Result<Response<AnswerReply>, Status> {
@@ -457,8 +457,35 @@ mod test {
             actor: "Me".to_string(),
         });
 
-        let response = catalog.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
+        let response = catalog.create(request).await;
+        assert!(response.is_ok());
+    }
+
+    #[tokio::test]
+    async fn double_create_fail() {
+        init_logger();
+
+        let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
+            DUMMY_ADDR.parse().unwrap(),
+            Vec::new(),
+            None,
+        )));
+
+        let request = tonic::Request::new(QueryRequest {
+            name: "VoteCounter".into(),
+            actor: "Me".to_string(),
+        });
+
+        let response = catalog.create(request).await;
+        assert!(response.is_ok());
+
+        let request = tonic::Request::new(QueryRequest {
+            name: "VoteCounter".into(),
+            actor: "Me".to_string(),
+        });
+
+        let response = catalog.create(request).await;
+        assert!(response.is_err());
     }
 
     #[tokio::test]
@@ -476,8 +503,8 @@ mod test {
             actor: "Me".to_string(),
         });
 
-        let response = catalog.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
+        let response = catalog.create(request).await;
+        assert!(response.is_ok());
 
         let request = tonic::Request::new(QueryRequest {
             name: "VoteCounter".into(),
@@ -503,8 +530,8 @@ mod test {
             actor: "Me".to_string(),
         });
 
-        let response = catalog.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
+        let response = catalog.create(request).await;
+        assert!(response.is_ok());
 
         let mut response = None;
         for _ in 0..3 {
@@ -533,8 +560,8 @@ mod test {
             actor: "Me".to_string(),
         });
 
-        let response = catalog.create(request).await.unwrap();
-        assert_eq!(response.get_ref().status, 0);
+        let response = catalog.create(request).await;
+        assert!(response.is_ok());
 
         for _ in 0..10 {
             let request = tonic::Request::new(QueryRequest {
