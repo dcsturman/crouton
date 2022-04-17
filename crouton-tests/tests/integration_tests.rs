@@ -59,13 +59,13 @@ mod tests {
         init_logger();
 
         let mut _first = Command::new(SERVER_PATH)
-            .args(["-p", "50055", "-s", "[::1]:50066"])
+            .args(["-p", "50055", "-s", "[::1]:50065"])
             .kill_on_drop(true)
             .spawn()
             .expect("First daemon failed to start.");
 
         let mut _second = Command::new(SERVER_PATH)
-            .args(["-p", "50065", "-s", "[::1]:50056"])
+            .args(["-p", "50065", "-s", "[::1]:50055"])
             .kill_on_drop(true)
             .spawn()
             .expect("Second daemon failed to start.");
@@ -97,7 +97,7 @@ mod tests {
         init_logger();
 
         let mut _first = Command::new(SERVER_PATH)
-            .args(["-p", "50057", "-s", "[::1]:50068"])
+            .args(["-p", "50057", "-s", "[::1]:50067"])
             .kill_on_drop(true)
             .spawn()
             .expect("First daemon failed to start.");
@@ -110,7 +110,7 @@ mod tests {
         let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
         let mut _second = Command::new(SERVER_PATH)
-            .args(["-p", "50067", "-s", "[::1]:50058"])
+            .args(["-p", "50067", "-s", "[::1]:50057"])
             .kill_on_drop(true)
             .spawn()
             .expect("Second daemon failed to start.");
@@ -132,13 +132,13 @@ mod tests {
         init_logger();
 
         let mut _first = Command::new(SERVER_PATH)
-            .args(["-p", "50100", "-s", "[::1]:50111", "[::1]:50121"])
+            .args(["-p", "50100", "-s", "[::1]:50110", "[::1]:50120"])
             .kill_on_drop(true)
             .spawn()
             .expect("First daemon failed to start.");
 
         let mut _second = Command::new(SERVER_PATH)
-            .args(["-p", "50110", "-s", "[::1]:50101", "[::1]:50121"])
+            .args(["-p", "50110", "-s", "[::1]:50100", "[::1]:50120"])
             .kill_on_drop(true)
             .spawn()
             .expect("Second daemon failed to start.");
@@ -150,7 +150,7 @@ mod tests {
         let _response = first_client.inc(DEFAULT_COUNTER_NAME).await.unwrap();
 
         let mut _third = Command::new(SERVER_PATH)
-            .args(["-p", "50120", "-s", "[::1]:50101", "[::1]:50111"])
+            .args(["-p", "50120", "-s", "[::1]:50100", "[::1]:50110"])
             .kill_on_drop(true)
             .spawn()
             .expect("Third (late) daemon failed to start.");
@@ -172,13 +172,13 @@ mod tests {
         init_logger();
 
         let mut _first = Command::new(SERVER_PATH)
-            .args(["-p", "50200", "-s", "[::1]:50211", "[::1]:50221"])
+            .args(["-p", "50200", "-s", "[::1]:50210", "[::1]:50220"])
             .kill_on_drop(true)
             .spawn()
             .expect("First daemon failed to start.");
 
         let mut second = Command::new(SERVER_PATH)
-            .args(["-p", "50210", "-s", "[::1]:50201", "[::1]:50221"])
+            .args(["-p", "50210", "-s", "[::1]:50200", "[::1]:50220"])
             .kill_on_drop(true)
             .spawn()
             .expect("Second daemon failed to start.");
@@ -204,7 +204,7 @@ mod tests {
         sleep(Duration::from_millis(2000)).await;
 
         let mut _second = Command::new(SERVER_PATH)
-            .args(["-p", "50210", "-s", "[::1]:50201", "[::1]:50221"])
+            .args(["-p", "50210", "-s", "[::1]:50200", "[::1]:50220"])
             .kill_on_drop(true)
             .spawn()
             .expect("Second daemon failed to start.");

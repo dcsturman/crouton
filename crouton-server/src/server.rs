@@ -35,9 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     let c_port = matches.value_of("port").unwrap_or("50051");
-    let r_port = (c_port.parse::<i32>().unwrap_or(50052) + 1).to_string();
     let c_addr = format!("[::1]:{}", c_port).parse()?;
-    let r_addr = format!("[::1]:{}", r_port).parse()?;
 
     let cluster = match matches.values_of("servers") {
         None => Vec::new(),
@@ -51,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Known peers: {:?}", cluster);
 
-    build_services(cluster, c_addr, r_addr).await?;
+    build_services(cluster, c_addr).await?;
 
     Ok(())
 }

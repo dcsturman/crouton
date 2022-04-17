@@ -354,7 +354,6 @@ impl Replica for ArcCroutonCatalog {
 pub async fn build_services(
     cluster: Vec<SocketAddr>,
     c_addr: SocketAddr,
-    r_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("build_services: Starting server...");
 
@@ -387,20 +386,13 @@ pub async fn build_services(
 
     let catalog_server = Server::builder()
         .add_service(CatalogServer::new(catalog.clone()))
+        .add_service(ReplicaServer::new(catalog.clone()))        
         .serve(c_addr);
     info!(
         "build_services: Starting up Catalog Service on port {}.",
         c_addr
     );
-
-    let replica_server = Server::builder()
-        .add_service(ReplicaServer::new(catalog.clone()))
-        .serve(r_addr);
-    info!(
-        "build_services: Starting up Replica Service on port {}.",
-        r_addr
-    );
-    try_join!(catalog_server, replica_server)?;
+    try_join!(catalog_server)?;
 
     Ok(())
 }
