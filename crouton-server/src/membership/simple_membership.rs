@@ -1,3 +1,14 @@
+use crate::membership::{MembershipService, MembershipUpcall};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::RwLock;
+
+#[allow(unused_imports)]
+use log::{error, info, trace, warn};
+
 pub struct SimpleMembershipService<T: Clone + Sync + Send> {
     peers: Arc<RwLock<HashMap<SocketAddr, Option<T>>>>,
     tx: Option<mpsc::Sender<()>>,

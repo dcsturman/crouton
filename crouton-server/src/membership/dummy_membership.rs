@@ -1,6 +1,12 @@
 // Implementation for MembershipService for use in things like unit tests.
 // It does nothing in for unit tests most of the methods should never get called.
 pub struct DummyMembershipService;
+use async_trait::async_trait;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::mpsc::Receiver;
+
+use crate::membership::{MembershipService, MembershipUpcall};
 
 #[cfg(test)]
 impl DummyMembershipService {

@@ -29,7 +29,8 @@ use tokio::{self, task, try_join};
 
 mod membership;
 
-use crate::membership::{MembershipService, MembershipUpcall, SimpleMembershipService};
+use crate::membership::simple_membership::SimpleMembershipService;
+use crate::membership::{MembershipService, MembershipUpcall};
 
 type CatalogValueTable = HashMap<String, PNCounter<String>>;
 pub struct CroutonCatalog {
@@ -407,7 +408,8 @@ pub async fn build_services(
 #[cfg(test)]
 mod test {
     use super::*;
-    use membership::DummyMembershipService;
+    use membership::dummy_membership::DummyMembershipService;
+
     use std::sync::Once;
 
     static INIT: Once = Once::new();
