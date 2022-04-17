@@ -15,16 +15,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Port for target server.")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("actor")
+                .short("a")
+                .long("actor")
+                .value_name("ACTOR")
+                .help("Name of Actor for this client.")
+                .takes_value(true),
+        )
         .get_matches();
 
     let port = matches.value_of("port").unwrap_or("50051");
+    let actor = matches.value_of("actor").unwrap_or("Me");
     let dst = format!("http://[::1]:{}", port);
 
     let mut client = CatalogClient::connect(dst).await?;
 
     let request = tonic::Request::new(QueryRequest {
         name: "VoteCounter".into(),
-        actor: "Me".to_string(),
+        actor: actor.to_string(),
     });
 
     let response = client.create(request).await?;
@@ -33,14 +42,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let request = tonic::Request::new(QueryRequest {
         name: "VoteCounter".into(),
-        actor: "Me".to_string(),
+        actor: actor.to_string(),
     });
 
     client.inc(request).await?;
 
     let request = tonic::Request::new(QueryRequest {
         name: "VoteCounter".into(),
-        actor: "Me".to_string(),
+        actor: actor.to_string(),
     });
 
     let response = client.inc(request).await?;
@@ -48,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let request = tonic::Request::new(QueryRequest {
         name: "VoteCounter".into(),
-        actor: "Me".to_string(),
+        actor: actor.to_string(),
     });
 
     let response = client.read(request).await?;

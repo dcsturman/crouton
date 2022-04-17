@@ -1,3 +1,5 @@
+use anyhow::Result;
+use async_trait::async_trait;
 use crouton_protos::catalog::catalog_server::{Catalog, CatalogServer};
 use crouton_protos::catalog::{AnswerReply, QueryRequest};
 use futures::future::join_all;
@@ -25,26 +27,61 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio::{self, task, try_join};
 
+mod membership;
+
+use crate::membership::{MembershipService, MembershipUpcall, SimpleMembershipService};
+
 type CatalogValueTable = HashMap<String, PNCounter<String>>;
-type PeerTable = HashMap<SocketAddr, Option<ReplicaClient<tonic::transport::Channel>>>;
-#[derive(Debug)]
 pub struct CroutonCatalog {
     address: SocketAddr,
     values: RwLock<CatalogValueTable>,
-    peers: RwLock<PeerTable>,
+    membership: Box<dyn MembershipService<ReplicaClient<Channel>> + Send + Sync>,
     wakeup_tx: Option<Sender<()>>,
+}
+
+#[async_trait]
+impl<'a> MembershipUpcall<ReplicaClient<Channel>> for CroutonCatalog {
+    async fn initialize_new_client(
+        &self,
+        addr: &SocketAddr,
+    ) -> Result<ReplicaClient<tonic::transport::Channel>> {
+        info!(
+            "CroutonCatalog::initialize_new_client: {:?} initializing new connection to {:?}",
+            self.address, addr
+        );
+        let mut new_client = ReplicaClient::connect(format!("http://{}", addr)).await?;
+
+        let values = self.values.read().await;
+        info!(
+            "CroutonCatalog::initialize_new_client: {:?} sending all state to {:?}",
+            self.address, addr
+        );
+        CroutonCatalog::send_all_state(&mut new_client, &values).await?;
+
+        let msg = AliveRequest {
+            address: self.address.to_string(),
+        };
+
+        info!(
+            "CroutonCatalog::initialize_new_client: {:?} sending alive message to {:?}",
+            self.address, addr
+        );
+        new_client.alive(msg).await?;
+
+        Ok(new_client)
+    }
 }
 
 impl CroutonCatalog {
     pub fn new(
         address: SocketAddr,
-        peers: Vec<SocketAddr>,
+        membership: Box<dyn MembershipService<ReplicaClient<Channel>> + Send + Sync>,
         wakeup: Option<Sender<()>>,
     ) -> CroutonCatalog {
         CroutonCatalog {
             address,
             values: RwLock::new(HashMap::new()),
-            peers: RwLock::new(peers.iter().map(|s| (*s, None)).collect()),
+            membership,
             wakeup_tx: wakeup,
         }
     }
@@ -55,9 +92,13 @@ impl CroutonCatalog {
     }
 
     async fn send_all_state(
-        mut client: ReplicaClient<Channel>,
+        client: &mut ReplicaClient<Channel>,
         values: &CatalogValueTable,
     ) -> Result<Response<()>, Status> {
+        info!(
+            "CroutonCatalog::send_all_state: Sending all state {:?}",
+            values
+        );
         for (name, value) in values.iter() {
             let msg = ApplyRequest {
                 name: name.clone(),
@@ -71,96 +112,8 @@ impl CroutonCatalog {
     }
 
     async fn remove_peer(&self, addr: &SocketAddr) {
-        let mut peers = self.peers.write().await;
         info!("CroutonCatalog::remove_peer: Removing {:?}", addr);
-        peers.insert(*addr, None);
-    }
-
-    pub async fn check_connections(&self, rx: &mut Receiver<()>) {
-        loop {
-            // Wait for a wakeup signal to check all the connections again.
-            rx.recv().await;
-
-            // Why are we cloning here? Because otherwise we need to hold the
-            // read lock, and cannot then grab the write lock later on.
-            // So we use the read lock, grab a snapshot (we're fine if its a bit stale)
-            // and use the clone of that.
-            let peers = self.peers.read().await.clone();
-
-            info!("CroutonCatalog::check_connections: Waking up and checking connections");
-
-            // Find the list of peers with home we do not have connections.
-            let missing_peers = peers
-                .iter()
-                .filter_map(|(&addr, client)| {
-                    if client.as_ref().is_none() {
-                        Some(addr)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<SocketAddr>>();
-
-            // If there are no peers without connections, we can just end this - no more work to do!
-            if missing_peers.is_empty() {
-                info!("CroutonCatalog::check_connections: No update to peer clients so exiting early.");
-                continue;
-            }
-
-            let values = self.values.read().await.clone();
-            let mut new_clients = Vec::new();
-            for addr in missing_peers.iter() {
-                let new_client = ReplicaClient::connect(format!("http://{}", addr))
-                    .await
-                    .ok();
-
-                if let Some(active) = new_client.as_ref() {
-                    let msg = AliveRequest {
-                        address: self.address.to_string(),
-                    };
-                    let mut active = active.clone();
-                    info!(
-                        "CroutonCatalog::check_connections: Send alive message from {:?} to {:?}",
-                        self.address.to_string(),
-                        addr.to_string()
-                    );
-                    active.alive(msg).await.unwrap_or_else(|e| {
-                        error!(
-                            "CroutonCatalog::check_connections: Call to alive from {:?} to  {:?} failed: {:?}",
-                            self.address,
-                            addr,
-                            e
-                        );
-                        Response::new(())
-                    });
-                    match CroutonCatalog::send_all_state(active, &values).await {
-                        Ok(_) => (),
-                        Err(_) => self.remove_peer(addr).await,
-                    }
-                } else {
-                    info!(
-                        "CroutonCatalog::check_connections: Failed to connect to {}",
-                        addr
-                    );
-                }
-                new_clients.push((addr, new_client));
-            }
-
-            // Put this code in its own block to ensure we release the write lock before we wait
-            // on the wakeup signal.
-            // Add the results from our attempts to connect into our table.
-            // Each such entry is a valid client Some(client) or invalid None.
-            {
-                let mut table = self.peers.write().await;
-                for (&addr, client) in new_clients.iter() {
-                    if let Some(c) = client {
-                        table.insert(addr, Some(c.clone()));
-                    } else {
-                        table.insert(addr, None);
-                    }
-                }
-            }
-        }
+        self.membership.remove_peer(addr).await;
     }
 
     async fn send_update<T: CvRDT + Debug + Serialize>(&self, name: &str, crdt: &T) {
@@ -172,26 +125,22 @@ impl CroutonCatalog {
 
         let crdt_json = &serde_json::to_string(&crdt).unwrap();
 
-        trace!("CroutonCatalog::send_update: Attempt to get read lock on peers.");
-        let peers = self.peers.read().await;
-        trace!("CroutonCatalog::send_update: Obtained read lock on peers.");
+        let peers = self.membership.get_peers().await;
 
         info!(
             "CroutonCatalog::send_update: Dump of peers: {:?}",
-            peers.keys().map(|k| k.to_string())
+            peers.iter().map(|(k, _)| k.to_string())
         );
 
         let live_peers = peers
             .iter()
             .filter(|(_, client)| client.is_some())
-            .map(|(&addr, client)| (addr, client.as_ref().unwrap().clone()))
+            .map(|(addr, client)| (addr, client.as_ref().unwrap().clone()))
             .collect::<Vec<_>>();
         info!(
             "CroutonCatalog::send_update: Send update to {} peers.",
             live_peers.len()
         );
-
-        drop(peers);
 
         let changes = stream::iter(live_peers.iter())
             .map(|(addr, client)| async move {
@@ -223,10 +172,23 @@ impl CroutonCatalog {
 
         join_all(changes).await;
     }
+
+    async fn check_connections(
+        &self,
+        handler: Arc<dyn MembershipUpcall<ReplicaClient<Channel>> + Send + Sync + 'static>,
+        rx: &mut Receiver<()>,
+    ) {
+        self.membership.check_connections(handler, rx).await;
+    }
 }
 
 struct ArcCroutonCatalog(Arc<CroutonCatalog>);
 
+impl ArcCroutonCatalog {
+    pub fn new(catalog: CroutonCatalog) -> ArcCroutonCatalog {
+        ArcCroutonCatalog(Arc::new(catalog))
+    }
+}
 impl Deref for ArcCroutonCatalog {
     type Target = Arc<CroutonCatalog>;
 
@@ -244,6 +206,12 @@ impl DerefMut for ArcCroutonCatalog {
 impl Clone for ArcCroutonCatalog {
     fn clone(&self) -> Self {
         ArcCroutonCatalog(self.0.clone())
+    }
+}
+
+impl From<ArcCroutonCatalog> for Arc<CroutonCatalog> {
+    fn from(acc: ArcCroutonCatalog) -> Arc<CroutonCatalog> {
+        acc.0
     }
 }
 
@@ -390,11 +358,18 @@ pub async fn build_services(
     info!("build_services: Starting server...");
 
     let (tx, mut rx): (Sender<()>, Receiver<()>) = mpsc::channel(100);
-    let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(c_addr, cluster, Some(tx))));
+
+    // Okay, I have a problem here.  I need the MembershipService to initialize the catalog, but the catalog (as the upcall handler) to
+    // initialize the membership service.  Need to make one have an internal Option - which first?
+    // Create membership_serice so I don't need to have a mut method on the Arc (or add a Mutext inside or such).
+    let membership_service = Box::new(SimpleMembershipService::new(cluster));
+    let catalog = ArcCroutonCatalog::new(CroutonCatalog::new(c_addr, membership_service, Some(tx)));
+
     let forever = catalog.clone();
     task::spawn(async move {
         let x = forever.clone();
-        x.check_connections(&mut rx).await;
+        // OMG this is ugly. I'm passing x in as the struct (self) and as another pointer
+        x.check_connections(forever.clone().0, &mut rx).await;
     });
 
     task::yield_now().await;
@@ -432,6 +407,7 @@ pub async fn build_services(
 #[cfg(test)]
 mod test {
     use super::*;
+    use membership::DummyMembershipService;
     use std::sync::Once;
 
     static INIT: Once = Once::new();
@@ -448,7 +424,7 @@ mod test {
 
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
@@ -467,7 +443,7 @@ mod test {
 
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
@@ -494,7 +470,7 @@ mod test {
 
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
@@ -521,7 +497,7 @@ mod test {
 
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
@@ -551,7 +527,7 @@ mod test {
 
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
@@ -587,13 +563,13 @@ mod test {
 
         let original = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
         let target = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
-            Vec::new(),
+            Box::new(DummyMembershipService::new()),
             None,
         )));
 
