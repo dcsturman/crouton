@@ -15,8 +15,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
 
-pub mod dummy_membership;
-pub mod simple_membership;
+pub mod dummy;
+pub mod simple;
 
 #[allow(unused_imports)]
 use log::{error, info, trace, warn};
