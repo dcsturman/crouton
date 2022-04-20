@@ -22,7 +22,7 @@ use log::{error, info, trace, warn};
 
 #[async_trait]
 pub trait MembershipUpcall<T: Sync + Send> {
-    async fn initialize_new_client(&self, addr: &SocketAddr) -> Result<T>;
+    async fn initialize_new_connection(&self, addr: &SocketAddr) -> Result<T>;
 }
 
 #[async_trait]

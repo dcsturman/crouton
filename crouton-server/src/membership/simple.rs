@@ -100,7 +100,7 @@ impl<'a, T: Clone + Sync + Send> MembershipService<T> for SimpleMembershipServic
                     "SimpleMembershipService::check_connections: Trying address {:?}",
                     addr
                 );
-                let new_client = handler.initialize_new_client(addr).await.ok();
+                let new_client = handler.initialize_new_connection(addr).await.ok();
                 if new_client.is_none() {
                     info!(
                         "SimpleMembershipService::check_connections: Didn't connect to {:?}",

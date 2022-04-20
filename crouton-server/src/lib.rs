@@ -52,19 +52,19 @@ pub struct CroutonCatalog {
 
 #[async_trait]
 impl<'a> MembershipUpcall<ReplicaClient<Channel>> for CroutonCatalog {
-    async fn initialize_new_client(
+    async fn initialize_new_connection(
         &self,
         addr: &SocketAddr,
     ) -> Result<ReplicaClient<tonic::transport::Channel>> {
         info!(
-            "CroutonCatalog::initialize_new_client: {:?} initializing new connection to {:?}",
+            "CroutonCatalog::initialize_new_connection: {:?} initializing new connection to {:?}",
             self.address, addr
         );
         let mut new_client = ReplicaClient::connect(format!("http://{}", addr)).await?;
 
         let values = self.values.read().await;
         info!(
-            "CroutonCatalog::initialize_new_client: {:?} sending all state to {:?}",
+            "CroutonCatalog::initialize_new_connection: {:?} sending all state to {:?}",
             self.address, addr
         );
         CroutonCatalog::send_all_state(&mut new_client, &values).await?;
@@ -74,7 +74,7 @@ impl<'a> MembershipUpcall<ReplicaClient<Channel>> for CroutonCatalog {
         };
 
         info!(
-            "CroutonCatalog::initialize_new_client: {:?} sending alive message to {:?}",
+            "CroutonCatalog::initialize_new_connection: {:?} sending alive message to {:?}",
             self.address, addr
         );
         new_client.alive(msg).await?;
