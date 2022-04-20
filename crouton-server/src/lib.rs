@@ -23,21 +23,31 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio::{self, task, try_join};
 
-mod membership;
+pub mod membership;
 
 use crate::membership::simple::SimpleMembershipService;
 use crate::membership::{MembershipService, MembershipUpcall};
 
 type CatalogValueTable = HashMap<String, PNCounter<String>>;
+
+/// Core struct for the entire service. `CroutonCatalog` maintains a set of CRDTs that are
+/// all shared between a set of peers.  Thanks to the properties of CRDTs they'll eventually converge.
+/// The `CroutonCatalog` implements interfaces to
+/// 1. Be called by a memebership service when it has as new peer to initialize.
+/// 2. Implement the Crouton grpc service to accept requests from clients.
+/// 3. Implement the Replica grpc service to accept requests from peers.
 pub struct CroutonCatalog {
+    /// IP address for this server, used with grpc interfaces.
     address: SocketAddr,
+    /// A hashmap from names of crdt's to crdts. Today all crdt's are counters (PNCounter).  Names
+    /// must be globally (across all servers) unique.
     values: RwLock<CatalogValueTable>,
+    /// Reference to a membership service, which can be implemented by any of a number of ways.
+    /// The `CroutonCatalog` doesn't care what the implemetnation is.
     membership: Box<dyn MembershipService<ReplicaClient<Channel>> + Send + Sync>,
-    wakeup_tx: Option<Sender<()>>,
 }
 
 #[async_trait]
@@ -77,19 +87,12 @@ impl CroutonCatalog {
     pub fn new(
         address: SocketAddr,
         membership: Box<dyn MembershipService<ReplicaClient<Channel>> + Send + Sync>,
-        wakeup: Option<Sender<()>>,
     ) -> CroutonCatalog {
         CroutonCatalog {
             address,
             values: RwLock::new(HashMap::new()),
             membership,
-            wakeup_tx: wakeup,
         }
-    }
-
-    pub fn get_wakeup_sender(&self) -> Sender<()> {
-        let tx = self.wakeup_tx.as_ref().unwrap();
-        tx.clone()
     }
 
     async fn send_all_state(
@@ -177,19 +180,24 @@ impl CroutonCatalog {
     async fn check_connections(
         &self,
         handler: Arc<dyn MembershipUpcall<ReplicaClient<Channel>> + Send + Sync + 'static>,
-        rx: &mut Receiver<()>,
     ) {
-        self.membership.check_connections(handler, rx).await;
+        self.membership.check_connections(handler).await;
     }
 }
 
-struct ArcCroutonCatalog(Arc<CroutonCatalog>);
+/// A simple wrapper for an `Arc<CroutonCatalog>`.  We provide this wrapper so that we can implement
+/// our two compiled grpc struture for this type.  If we just used `Arc<CroutonCatalog>` we could
+/// not do `impl Catalog for Arc<CroutonCatalog> {...}`.
+///
+/// We implement some helpful traits (Deref, DerefMut, Clone, From) to make things easier.
+pub struct ArcCroutonCatalog(Arc<CroutonCatalog>);
 
 impl ArcCroutonCatalog {
     pub fn new(catalog: CroutonCatalog) -> ArcCroutonCatalog {
         ArcCroutonCatalog(Arc::new(catalog))
     }
 }
+
 impl Deref for ArcCroutonCatalog {
     type Target = Arc<CroutonCatalog>;
 
@@ -216,8 +224,21 @@ impl From<ArcCroutonCatalog> for Arc<CroutonCatalog> {
     }
 }
 
+/// Implements the grpc Crouton interface for our underlying CroutonCatalog struct.  However, we do
+/// this for an ArcCroutonCatalog (really an Arc<CroutonCatalog>) as that is how its passed to the tonic logic.
+/// Crouton is the grpc interface a client uses to talk to a Crouton server serving shared crdt's.
 #[tonic::async_trait]
 impl Catalog for ArcCroutonCatalog {
+    /// Create a new crdt.  The request takes the following proto - net a name for the crdt and the actor creating it.
+    /// ```ignore
+    /// message QueryRequest {
+    ///   string name = 1;
+    ///   string actor = 2;
+    /// }
+    /// ```
+    /// Right now all new crdt's are counters and we'll change that in the future.
+    /// Note we could have skipped this verb and just had an operation auto-create a crdt but this helps
+    /// us avoid typo's where you could be working on the wrong counters in a distributed environment.
     async fn create(&self, request: Request<QueryRequest>) -> Result<Response<()>, Status> {
         info!(
             "Catalog::create: Got a request to create counter: {:?}",
@@ -339,13 +360,7 @@ impl Replica for ArcCroutonCatalog {
             self.address,
             req.get_ref().address
         );
-        let tx = self.get_wakeup_sender();
-        tx.send(()).await.unwrap_or_else(|e| {
-            panic!(
-                "Replica::alive: Failed signal wakeup at {:?}: \t{:?}",
-                self.address, e
-            )
-        });
+        self.membership.wakeup().await;
         info!("Replica::alive: {:?} woke itself up.", self.address);
         Ok(Response::new(()))
     }
@@ -357,27 +372,28 @@ pub async fn build_services(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("build_services: Starting server...");
 
-    let (tx, mut rx): (Sender<()>, Receiver<()>) = mpsc::channel(100);
-
-    // Okay, I have a problem here.  I need the MembershipService to initialize the catalog, but the catalog (as the upcall handler) to
-    // initialize the membership service.  Need to make one have an internal Option - which first?
-    // Create membership_serice so I don't need to have a mut method on the Arc (or add a Mutext inside or such).
+    // We need some sort of communcation between the membership service and the catalog.  I address this by having the catalog know about
+    // the membership service (we pass in the Box<SimpleMembershipService> and the Catalog owns this. In this way the catalog can query
+    // things like the current list of peers.
+    // To connect in the other direction (membershipservice->catalog) we note the only place membership needs to call the catalog is
+    // in a call to the MembershipUpcall trait, and that is done exclusively in check_connections.  So we call that from the catalog's
+    // check_connections, with a parameter that is the catalog (but acting as the MembershipUpcall).  Its all a bit messy but
+    // its safe and it works.
     let membership_service = Box::new(SimpleMembershipService::new(cluster));
-    let catalog = ArcCroutonCatalog::new(CroutonCatalog::new(c_addr, membership_service, Some(tx)));
+    let catalog = ArcCroutonCatalog::new(CroutonCatalog::new(c_addr, membership_service));
 
     let forever = catalog.clone();
     task::spawn(async move {
-        let x = forever.clone();
-        // OMG this is ugly. I'm passing x in as the struct (self) and as another pointer
-        x.check_connections(forever.clone().0, &mut rx).await;
+        // OMG this is ugly. I'm passing x in as the struct (self) and as another pointer.  This is necessary
+        // as we the implementation of MembershipUpcall to be an Arc<_> but the catalog owns the reference to MembershipService.
+        forever.check_connections(forever.clone().0).await;
     });
 
     task::yield_now().await;
-
-    let tx = catalog.get_wakeup_sender();
+    let forever = catalog.clone();
     task::spawn(async move {
         loop {
-            tx.send(()).await.unwrap();
+            forever.membership.wakeup().await;
             sleep(Duration::from_millis(10000)).await;
         }
     });
@@ -386,7 +402,7 @@ pub async fn build_services(
 
     let catalog_server = Server::builder()
         .add_service(CatalogServer::new(catalog.clone()))
-        .add_service(ReplicaServer::new(catalog.clone()))        
+        .add_service(ReplicaServer::new(catalog.clone()))
         .serve(c_addr);
     info!(
         "build_services: Starting up Catalog Service on port {}.",
@@ -419,7 +435,6 @@ mod test {
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let request = tonic::Request::new(QueryRequest {
@@ -438,7 +453,6 @@ mod test {
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let request = tonic::Request::new(QueryRequest {
@@ -465,7 +479,6 @@ mod test {
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let request = tonic::Request::new(QueryRequest {
@@ -492,7 +505,6 @@ mod test {
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let request = tonic::Request::new(QueryRequest {
@@ -522,7 +534,6 @@ mod test {
         let catalog = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let request = tonic::Request::new(QueryRequest {
@@ -558,13 +569,11 @@ mod test {
         let original = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let target = ArcCroutonCatalog(Arc::new(CroutonCatalog::new(
             DUMMY_ADDR.parse().unwrap(),
             Box::new(DummyMembershipService::new()),
-            None,
         )));
 
         let name = "VoteCounter";

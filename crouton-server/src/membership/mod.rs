@@ -13,7 +13,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc::Receiver;
 
 pub mod dummy;
 pub mod simple;
@@ -32,9 +31,5 @@ pub trait MembershipService<T: Clone + Sync + Send> {
     async fn remove_peer(&self, addr: &SocketAddr);
     async fn add_peer(&self, addr: &SocketAddr);
     async fn wakeup(&self);
-    async fn check_connections(
-        &self,
-        handler: Arc<(dyn MembershipUpcall<T> + Sync + Send)>,
-        rx: &mut Receiver<()>,
-    );
+    async fn check_connections(&self, handler: Arc<(dyn MembershipUpcall<T> + Sync + Send)>);
 }

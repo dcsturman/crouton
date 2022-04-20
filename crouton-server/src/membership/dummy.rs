@@ -4,7 +4,6 @@ pub struct DummyMembershipService;
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc::Receiver;
 
 use crate::membership::{MembershipService, MembershipUpcall};
 
@@ -33,11 +32,7 @@ impl<T: 'static + Clone + Sync + Send> MembershipService<T> for DummyMembershipS
         unimplemented!("Dummy membership should never be called.");
     }
 
-    async fn check_connections(
-        &self,
-        _handler: Arc<(dyn MembershipUpcall<T> + Sync + Send)>,
-        _rx: &mut Receiver<()>,
-    ) {
+    async fn check_connections(&self, _handler: Arc<(dyn MembershipUpcall<T> + Sync + Send)>) {
         unimplemented!("Dummy membership should never be called.");
     }
 }

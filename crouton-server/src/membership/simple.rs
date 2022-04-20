@@ -3,25 +3,29 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 #[allow(unused_imports)]
 use log::{error, info, trace, warn};
 
 pub struct SimpleMembershipService<T: Clone + Sync + Send> {
     peers: Arc<RwLock<HashMap<SocketAddr, Option<T>>>>,
-    tx: Option<mpsc::Sender<()>>,
+    tx: mpsc::Sender<()>,
+    rx: Mutex<mpsc::Receiver<()>>,
 }
 
 impl<'a, T: Clone + Sync + Send> SimpleMembershipService<T> {
     pub fn new(peers: Vec<SocketAddr>) -> SimpleMembershipService<T> {
         info!("Creating membership service with peers: {:?}", peers);
         let peer_table = peers.iter().map(|peer| (*peer, None)).collect();
+        let (tx, rx) = mpsc::channel(100);
 
         SimpleMembershipService {
             peers: Arc::new(RwLock::new(peer_table)),
-            tx: None,
+            tx,
+            rx: Mutex::new(rx),
         }
     }
 }
@@ -49,14 +53,17 @@ impl<'a, T: Clone + Sync + Send> MembershipService<T> for SimpleMembershipServic
     }
 
     async fn wakeup(&self) {
-        self.tx.as_ref().unwrap().send(()).await.unwrap();
+        self.tx.send(()).await.unwrap();
     }
 
-    async fn check_connections(
-        &self,
-        handler: Arc<(dyn MembershipUpcall<T> + Sync + Send)>,
-        rx: &mut Receiver<()>,
-    ) {
+    async fn check_connections(&self, handler: Arc<(dyn MembershipUpcall<T> + Sync + Send)>) {
+        // This is a bit of a hack that I'll explain here.
+        // In theory there could be many check_connection calls or threads, but there will only be one in reality.
+        // However, the call path is through an owner of this membership object, and likely that owner is an Arc<_>.
+        // So, the mutex allows us to get a mut on the receiver, but grabbing that lock up front is "safe"
+        // as there will only ever be one call here and one user of the rx.
+        // TODO: Is there a better way to do this?
+        let mut rx = self.rx.lock().await;
         loop {
             // Wait for a wakeup signal to check all the connections again.
             rx.recv().await;
